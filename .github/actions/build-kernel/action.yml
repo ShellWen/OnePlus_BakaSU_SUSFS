@@ -1294,6 +1294,26 @@ runs:
         if ! wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash -s main; then
           echo "::warning::BBG setup script failed, continuing anyway"
         fi
+
+        # Devices using the efisp exploit need to write these boot-chain
+        # partitions. Keep BBG enabled, but explicitly exempt them from its
+        # default-deny partition protection.
+        BBG_ALLOWLIST_HEADER="./Baseband-guard/baseband_guard.h"
+        if [ ! -f "$BBG_ALLOWLIST_HEADER" ]; then
+          echo "::error::BBG allowlist header not found: $BBG_ALLOWLIST_HEADER"
+          exit 1
+        fi
+        for partition in efisp abl; do
+          if ! grep -Eq "^[[:space:]]*\"${partition}\"," "$BBG_ALLOWLIST_HEADER"; then
+            sed -i "/^[[:space:]]*\"dtbo\",/a\\\t\"${partition}\"," "$BBG_ALLOWLIST_HEADER"
+          fi
+          if ! grep -Eq "^[[:space:]]*\"${partition}\"," "$BBG_ALLOWLIST_HEADER"; then
+            echo "::error::Failed to add BBG allowlist entry: $partition"
+            exit 1
+          fi
+        done
+        echo "✅ BBG allowlist enabled for efisp and abl"
+
         echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
         
