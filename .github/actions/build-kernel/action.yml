@@ -786,19 +786,39 @@ runs:
           )
           
           local download_url=""
+          local use_aria2=true
           if [[ "$url" == *"github.com"* ]]; then
               download_url="${url%.git}/archive/refs/heads/${branch}.tar.gz"
           elif [[ "$url" == *"gitlab.com"* ]]; then
-              download_url="${url%.git}/-/archive/${branch}/${repo_name}-${branch}.tar.gz"
+              # GitLab's web archive endpoint intermittently rejects concurrent
+              # range requests from hosted runners. Its API archive endpoint is
+              # stable for commit SHAs and works with curl's single connection.
+              local project_path="${url#https://gitlab.com/}"
+              local encoded_branch
+              project_path="${project_path%.git}"
+              project_path="${project_path//\//%2F}"
+              encoded_branch="$(jq -rn --arg value "$branch" '$value | @uri')"
+              download_url="https://gitlab.com/api/v4/projects/${project_path}/repository/archive.tar.gz?sha=${encoded_branch}"
+              use_aria2=false
           else
               echo "::error::Unsupported host: $url"
               return 1
           fi
           
           while [ $attempt -le $max_attempts ]; do
-              echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
-              
-              if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
+              echo " Attempt $attempt/$max_attempts: fetching $repo_name ($branch)"
+              local downloaded=false
+              if [ "$use_aria2" = true ]; then
+                  if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
+                    downloaded=true
+                  fi
+              else
+                  if curl --fail --location --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 \
+                    --user-agent 'Mozilla/5.0' --output "$shm_path" "$download_url"; then
+                    downloaded=true
+                  fi
+              fi
+              if [ "$downloaded" = true ]; then
                   mkdir -p "$repo_name"
                   if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
                       echo "✅ Success: $repo_name synced"
